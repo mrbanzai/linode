@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# <udf name="standard_user" Label="Unprivileged username" default="" />
+# <udf name="standard_user_password" Label="Unprivileged user's password" default="" />
+# <udf name="standard_user_authorized_key" Label="Unprivileged user's authorized key" default="" />
+# <udf name="sudo_usergroup" label="Usergroup to use for Admin Accounts" default="wheel" />
+# <udf name="sudo_passwordless" label="Passwordless Sudo" oneof="Require Password,Do Not Require Password" default="Require Password" />
+# <udf name="deployment_privkey" Label="Private key to be used when deploying / fetching resources" default="" />
+# <udf name="deployment_pubkey" Label="Public key to be used when deploying / fetching resources" default="" />
+# <udf name="puppet_modules_repo" Label="Puppet manifest / modules Git repository" default="" />
+# <udf name="puppet_manifest" Label="Puppet manifest" default="" />
+# <udf name="db_app_schema" Label="Database application schema name" default="" />
+# <udf name="db_app_username" Label="Database application username" default="" />
+# <udf name="db_app_password" Label="Database application password" default="" />
+# <udf name="notify_email" Label="Notification Email" default="" />
+
+exec 5>&1 7>&2
+exec 1>/root/stackscript.log 2>&1
+
+source <ssinclude StackScriptID="20">
+source <ssinclude StackScriptID="154">
+
+function install_additional_repos {
+  yum -y localinstall --nogpgcheck http://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-stable.noarch.rpm
+  yum -y localinstall --nogpgcheck http://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-stable.noarch.rpm
+  yum -y localinstall --nogpgcheck http://rpms.famillecollet.com/remi-release-17.rpm
+}
+
+system_update
+install_basics
+postfix_install_loopback_only
+
+install_additional_repos
+
+# Make sure we don't log the password in history
+export HISTIGNORE="*useradd*,*passwd*,*FACTER*,${HISTIGNORE}"
+
+# Setup root SSH config (for GitHub)
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+
+cat <<-EOF > /root/.ssh/jobcastle-deployment
+${DEPLOYMENT_PRIVKEY}
+EOF
+chmod 600 /root/.ssh/jobcastle-deployment
+
+cat <<-EOF > /root/.ssh/jobcastle-deployment.pub
+${DEPLOYMENT_PUBKEY}
+EOF
+chmod 600 /root/.ssh/jobcastle-deployment.pub
+
+cat <<-EOF > /root/.ssh/config
+Host github.com
+  IdentityFile ~/.ssh/jobcastle-deployment
+  User git
+  StrictHostKeyChecking no
+EOF
+chmod 600 /root/.ssh/config
+
+
+yum -y install puppet git 2>/dev/null
+
+
+mkdir -p /tmp/puppet
+git clone --recursive "${PUPPET_MODULES_REPO}" /tmp/puppet/modules
+
+cat <<-EOF > /tmp/puppet/jobcastle.pp
+${PUPPET_MANIFEST}
+EOF
+
+export FACTER_db_app_username="${DB_APP_USERNAME}"
+export FACTER_db_app_password="${DB_APP_PASSWORD}"
+export FACTER_db_app_schema="${DB_APP_SCHEMA}"
+export FACTER_sudo_usergroup="${SUDO_USERGROUP}"
+
+case "${SUDO_PASSWORDLESS}" in
+"Do Not Require Password") export FACTER_sudo_passwordless="true" ;;
+*) export FACTER_sudo_passwordless="false" ;;
+esac
+
+export FACTER_standard_user="${STANDARD_USER}"
+export FACTER_standard_user_password="${STANDARD_USER_PASSWORD}"
+
+# Split key into parts
+STANDARD_USER_AUTHORIZED_KEY=(${STANDARD_USER_AUTHORIZED_KEY})
+
+export FACTER_standard_user_authorized_key_type="${STANDARD_USER_AUTHORIZED_KEY[0]}"
+# Grab everything at the end of the line (since names can contain spaces)
+export FACTER_standard_user_authorized_key_name="${STANDARD_USER_AUTHORIZED_KEY[@]:2}"
+export FACTER_standard_user_authorized_key="${STANDARD_USER_AUTHORIZED_KEY[1]}"
+
+puppet apply --modulepath=/tmp/puppet/modules --verbose /tmp/puppet/jobcastle.pp
+
+exec 2>&7 1>&5
+
+IP=`hostname -I`
+
+if [ -n "${NOTIFY_EMAIL}" ]
+then
+  cat <<-EOF | mail -s "Linode Provisioning Complete" "${NOTIFY_EMAIL}" -a /root/stackscript.log
+Your JobCastle Linode provisioning is complete!
+
+You may now access your new server with the username '${STANDARD_USER}', eg.:
+
+  \$ ssh ${STANDARD_USER}@${IP}
+
+The provision log is attached, and available at /root/stackscript.log on the server.
+
+
+EOF
+fi
