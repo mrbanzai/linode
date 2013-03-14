@@ -1,0 +1,128 @@
+#!/bin/bash
+#
+# <udf name="db_password" Label="MySQL root Password" />
+# <udf name="db_name" Label="Create Database" default="" example="Optionally create this database" />
+# <udf name="db_user" Label="Create MySQL User" default="" example="Optionally create this user" />
+# <udf name="db_user_password" Label="MySQL User's Password" default="" example="User's password" />
+
+set -e
+set -u
+
+exec &> /root/stackscript.log
+
+source <ssinclude StackScriptID="20">
+source <ssinclude StackScriptID="154">
+
+function mysql_install {
+	# $1 - the mysql root password
+
+	if [ ! -n "$1" ]; then
+		echo "mysql_install() requires the root pass as its first argument"
+		return 1;
+	fi
+
+	yum -yq install mysql-server mysql
+
+	systemctl start mysql.service
+	echo "Sleeping while MySQL starts up for the first time..."
+	sleep 20
+	#Remove anonymous users
+	echo "DELETE FROM mysql.user WHERE User='';" | mysql -u root
+	#Remove remote root
+	echo "DELETE FROM mysql.user WHERE User='root' AND Host!='localhost';" | mysql -u root
+	#Remove test db
+	echo "DROP DATABASE test;" | mysql -u root
+	#Set root password
+	echo "UPDATE mysql.user SET Password=PASSWORD('$1') WHERE User='root';" | mysql -u root
+	#Flush privs
+	echo "FLUSH PRIVILEGES;" | mysql -u root
+}
+
+function install_additional_repos {
+	yum -y localinstall --nogpgcheck http://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-stable.noarch.rpm
+	yum -y localinstall --nogpgcheck http://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-stable.noarch.rpm
+	yum -y localinstall --nogpgcheck http://rpms.famillecollet.com/remi-release-17.rpm
+}
+
+function php_install_apc {
+	yum -yq install php-pecl-apc
+	if [ -n "$1" ]; then
+		echo "apc.shm_size=${1}" >> /etc/php.d/apc.ini
+	fi
+	echo "apc.include_once_override = 1" >> /etc/php.d/apc.ini
+	touch /tmp/restart-httpd
+}
+
+function php_install_extensions {
+	yum -y install php-pear php-pdo php-mysql php-pgsql php-pecl-memcache php-gd php-mbstring php-mcrypt php-xml
+}
+
+function enable_service {
+	if [ ! -n "$1" ]; then
+		echo "enable_service() requires the service as its first argument"
+		return 1;
+	fi
+	systemctl enable ${1}.service
+	systemctl start ${1}.service
+}
+
+function disable_service {
+	if [ ! -n "$1" ]; then
+		echo "disable_service() requires the service as its first argument"
+		return 1;
+	fi
+	systemctl disable ${1}.service
+	systemctl stop ${1}.service
+}
+
+function restartServices {
+	for service in $(ls /tmp/restart-* | cut -d- -f2); do
+		systemctl restart ${service}.service
+		rm -f /tmp/restart-$service
+	done
+}
+
+function configure_firewall {
+	cp /etc/sysconfig/iptables /etc/sysconfig/iptables.bak
+	echo "# Firewall configuration written by system-config-firewall
+# Manual customization of this file is not recommended.
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -p icmp -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m state --state NEW -m tcp -p tcp --dport 22 -j ACCEPT
+-A INPUT -m state --state NEW -m tcp -p tcp --dport 80 -j ACCEPT
+-A INPUT -m state --state NEW -m tcp -p tcp --dport 443 -j ACCEPT
+-A INPUT -m state --state NEW -m tcp -p tcp --dport 8443 -j ACCEPT
+-A INPUT -j REJECT --reject-with icmp-host-prohibited
+-A FORWARD -j REJECT --reject-with icmp-host-prohibited
+COMMIT" > /etc/sysconfig/iptables
+	systemctl restart iptables.service
+}
+
+system_update
+install_basics
+postfix_install_loopback_only
+
+install_additional_repos
+
+alias yum="yum --enablerepo=remi"
+apache_tune
+mysql_install "$DB_PASSWORD"
+php_install_with_apache && php_install_apc && php_install_extensions && php_tune 32
+unalias yum
+
+mysql_create_database "$DB_PASSWORD" "$DB_NAME"
+mysql_create_user "$DB_PASSWORD" "$DB_USER" "$DB_USER_PASSWORD"
+mysql_grant_user "$DB_PASSWORD" "$DB_USER" "$DB_NAME"
+
+enable_service mysqld
+enable_service httpd
+enable_service postfix
+
+configure_firewall
+
+yum -yq install vim-enhanced git
