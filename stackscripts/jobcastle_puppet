@@ -61,10 +61,10 @@ chmod 600 /root/.ssh/config
 yum -y install puppet git 2>/dev/null
 
 
-mkdir -p /tmp/puppet
-git clone --recursive "${PUPPET_MODULES_REPO}" /tmp/puppet/modules
+mkdir -p /root/puppet
+git clone --recursive "${PUPPET_MODULES_REPO}" /root/puppet/modules
 
-cat <<-EOF > /tmp/puppet/jobcastle.pp
+cat <<-EOF > /root/puppet/jobcastle.pp
 ${PUPPET_MANIFEST}
 EOF
 
@@ -89,7 +89,21 @@ export FACTER_standard_user_authorized_key_type="${STANDARD_USER_AUTHORIZED_KEY[
 export FACTER_standard_user_authorized_key_name="${STANDARD_USER_AUTHORIZED_KEY[@]:2}"
 export FACTER_standard_user_authorized_key="${STANDARD_USER_AUTHORIZED_KEY[1]}"
 
-puppet apply --modulepath=/tmp/puppet/modules --verbose /tmp/puppet/jobcastle.pp
+
+cat <<-EOF > /root/puppet/facter_env.sh
+export FACTER_db_app_username="${FACTER_db_app_username}"
+export FACTER_db_app_password="${FACTER_db_app_password}"
+export FACTER_db_app_schema="${FACTER_db_app_schema}"
+export FACTER_sudo_usergroup="${FACTER_sudo_usergroup}"
+export FACTER_sudo_passwordless="${FACTER_sudo_passwordless}"
+export FACTER_standard_user="${FACTER_standard_user}"
+export FACTER_standard_user_password="${FACTER_standard_user_password}"
+export FACTER_standard_user_authorized_key_type="${FACTER_standard_user_authorized_key_type}"
+export FACTER_standard_user_authorized_key_name="${FACTER_standard_user_authorized_key_name}"
+export FACTER_standard_user_authorized_key="${FACTER_standard_user_authorized_key}"
+EOF
+
+puppet apply --modulepath=/root/puppet/modules --verbose /root/puppet/jobcastle.pp
 
 exec 2>&7 1>&5
 
